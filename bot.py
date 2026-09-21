@@ -17,7 +17,7 @@ COUNTER_FILE = "/tmp/vton_counter.json"
 
 # Photos larger than this (on the longest side) get resized down before processing,
 # to keep memory usage low on the free instance.
-MAX_IMAGE_DIMENSION = 1024
+MAX_IMAGE_DIMENSION = 768
 
 PHOTO1, PHOTO2 = range(2)
 
@@ -111,7 +111,7 @@ async def get_photo2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             garm_img=handle_file(garment_path),
             garment_des="clothing",
             is_checked=True,
-            is_checked_crop=False,
+            is_checked_crop=True,
             denoise_steps=30,
             seed=42,
             api_name="/tryon"
