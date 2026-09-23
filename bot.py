@@ -61,6 +61,12 @@ def _cleanup_files(paths):
             print(f"Cleanup error for {p}: {e}")
 
 
+def _restart_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 دوباره امتحان کن", callback_data="restart")]
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counter = _load_counter()
     if counter["count"] >= DAILY_LIMIT:
@@ -80,6 +86,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def begin_tryon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    await query.edit_message_text("لطفاً اول عکس خودتون رو ارسال کنید. 📸")
+    return PHOTO1
+
+
+async def restart_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    counter = _load_counter()
+    if counter["count"] >= DAILY_LIMIT:
+        await query.edit_message_text("ظرفیت امروز پر شد، فردا دوباره امتحان کنید.")
+        return ConversationHandler.END
+
     await query.edit_message_text("لطفاً اول عکس خودتون رو ارسال کنید. 📸")
     return PHOTO1
 
@@ -161,7 +180,8 @@ async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
                 photo=photo,
-                caption="از اتاق پرو اومدید بیرون! می\u200cتونید خودتون رو توی آینه\u200cی زاروس ببینید. 🪞😍😍😍"
+                caption="از اتاق پرو اومدید بیرون! می\u200cتونید خودتون رو توی آینه\u200cی زاروس ببینید. 🪞😍😍😍",
+                reply_markup=_restart_keyboard()
             )
 
         counter = _load_counter()
@@ -171,7 +191,8 @@ async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="اتاق‌های پرو همه پر هستن، لطفا چند دقیقه صبر کنید.\nممنون از شکیبایی شما. 🙏"
+            text="اتاق‌های پرو همه پر هستن، لطفا چند دقیقه صبر کنید.\nممنون از شکیبایی شما. 🙏",
+            reply_markup=_restart_keyboard()
         )
         print(f"Error: {e}")
 
@@ -185,7 +206,10 @@ async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("عملیات لغو شد. برای شروع مجدد /start را بفرستید.")
+    await update.message.reply_text(
+        "عملیات لغو شد. برای شروع مجدد دکمه‌ی زیر رو بزنید. 👇",
+        reply_markup=_restart_keyboard()
+    )
     return ConversationHandler.END
 
 
@@ -198,7 +222,10 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[
+            CommandHandler('start', start),
+            CallbackQueryHandler(restart_flow, pattern="^restart$"),
+        ],
         states={
             WELCOME: [CallbackQueryHandler(begin_tryon, pattern="^begin_tryon$")],
             PHOTO1: [MessageHandler(filters.PHOTO, get_photo1)],
