@@ -1,6 +1,7 @@
 import os
 import gc
 import json
+import shutil
 import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
@@ -61,9 +62,54 @@ def _cleanup_files(paths):
             print(f"Cleanup error for {p}: {e}")
 
 
+def _run_tryon(person_path, garment_path, category):
+    """
+    category: "upper" or "lower".
+    Returns the local file path of the generated result image.
+    """
+    if category == "lower":
+        # yisol/IDM-VTON is only trained for upper-body garments, so for
+        # pants/shorts we use franciszzj/Leffa instead, which has a
+        # dedicated DressCode-trained model for lower-body garments.
+        client = Client("franciszzj/Leffa")
+        result = client.predict(
+            handle_file(person_path),
+            handle_file(garment_path),
+            False,          # ref_acceleration
+            30,             # inference steps
+            2.5,            # guidance scale
+            42,             # seed
+            "dress_code",   # vt_model_type
+            "lower_body",   # vt_garment_type
+            False,          # vt_repaint
+            api_name="/leffa_predict_vt"
+        )
+    else:
+        client = Client("yisol/IDM-VTON")
+        result = client.predict(
+            dict={"background": handle_file(person_path), "layers": [], "composite": None},
+            garm_img=handle_file(garment_path),
+            garment_des="clothing",
+            is_checked=True,
+            is_checked_crop=True,
+            denoise_steps=30,
+            seed=42,
+            api_name="/tryon"
+        )
+
+    return result[0] if isinstance(result, (list, tuple)) else result
+
+
 def _restart_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 دوباره امتحان کن", callback_data="restart")]
+    ])
+
+
+def _result_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👖 هم بالاتنه هم پایین‌تنه رو ببین", callback_data="add_more")],
+        [InlineKeyboardButton("🔄 شروع از اول", callback_data="restart")]
     ])
 
 
@@ -72,6 +118,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if counter["count"] >= DAILY_LIMIT:
         await update.message.reply_text("ظرفیت امروز پر شد، فردا دوباره امتحان کنید.")
         return ConversationHandler.END
+
+    _cleanup_files([context.user_data.pop("last_result_path", None)])
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 شروع پرو مجازی", callback_data="begin_tryon")]
@@ -96,11 +144,37 @@ async def restart_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     counter = _load_counter()
     if counter["count"] >= DAILY_LIMIT:
-        await query.edit_message_text("ظرفیت امروز پر شد، فردا دوباره امتحان کنید.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="ظرفیت امروز پر شد، فردا دوباره امتحان کنید.")
         return ConversationHandler.END
 
-    await query.edit_message_text("لطفاً اول عکس خودتون رو ارسال کنید. 📸")
+    _cleanup_files([context.user_data.pop("last_result_path", None)])
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="لطفاً اول عکس خودتون رو ارسال کنید. 📸")
     return PHOTO1
+
+
+async def add_more_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    counter = _load_counter()
+    if counter["count"] >= DAILY_LIMIT:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="ظرفیت امروز پر شد، فردا دوباره امتحان کنید.")
+        return ConversationHandler.END
+
+    last_result_path = context.user_data.get("last_result_path")
+    if not last_result_path or not os.path.exists(last_result_path):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="این ست دیگه در دسترس نیست، لطفاً دوباره با /start شروع کنید.")
+        return ConversationHandler.END
+
+    # Use the previous result as the new "person photo" for the next garment.
+    context.user_data["person_path"] = last_result_path
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="عالیه! حالا عکس لباس بعدی رو ارسال کنید تا ست‌تون کامل بشه. 👕👖"
+    )
+    return PHOTO2
 
 
 async def get_photo1(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -150,6 +224,7 @@ async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     garment_des = "pants" if query.data == "lower" else "clothing"
+    category = query.data  # "upper" or "lower"
 
     person_path = context.user_data.get("person_path")
     garment_path = context.user_data.get("garment_path")
@@ -161,27 +236,20 @@ async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("عکس‌ها دریافت شدن، شما در حال پوشیدن لباس هستید... ⏳✨")
 
     result_img_path = None
+    persistent_result_path = None
     try:
-        client = Client("yisol/IDM-VTON")
-        result = client.predict(
-            dict={"background": handle_file(person_path), "layers": [], "composite": None},
-            garm_img=handle_file(garment_path),
-            garment_des=garment_des,
-            is_checked=True,
-            is_checked_crop=True,
-            denoise_steps=30,
-            seed=42,
-            api_name="/tryon"
-        )
+        result_img_path = _run_tryon(person_path, garment_path, category)
 
-        result_img_path = result[0] if isinstance(result, (list, tuple)) else result
+        persistent_result_path = f"/tmp/result_{user_id}.jpg"
+        shutil.copy(result_img_path, persistent_result_path)
+        context.user_data["last_result_path"] = persistent_result_path
 
         with open(result_img_path, 'rb') as photo:
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
                 photo=photo,
-                caption="از اتاق پرو اومدید بیرون! می\u200cتونید خودتون رو توی آینه\u200cی زاروس ببینید. 🪞😍😍😍",
-                reply_markup=_restart_keyboard()
+                caption="از اتاق پرو اومدید بیرون! می\u200cتونید خودتون رو توی آینه\u200cی زاروس ببینید. 🪞😍😍😍\n\nاگه لباس بالا رو پرو کردید، پایین‌تنه هم می\u200cخواید ببینید؟ (یا برعکس) دکمه‌ی پایین رو بزنید 👇",
+                reply_markup=_result_keyboard()
             )
 
         counter = _load_counter()
@@ -197,7 +265,10 @@ async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error: {e}")
 
     finally:
-        _cleanup_files([person_path, garment_path, result_img_path])
+        files_to_clean = [garment_path, result_img_path]
+        if person_path != persistent_result_path:
+            files_to_clean.append(person_path)
+        _cleanup_files(files_to_clean)
         context.user_data.pop("person_path", None)
         context.user_data.pop("garment_path", None)
         gc.collect()
@@ -225,6 +296,7 @@ if __name__ == '__main__':
         entry_points=[
             CommandHandler('start', start),
             CallbackQueryHandler(restart_flow, pattern="^restart$"),
+            CallbackQueryHandler(add_more_flow, pattern="^add_more$"),
         ],
         states={
             WELCOME: [CallbackQueryHandler(begin_tryon, pattern="^begin_tryon$")],
