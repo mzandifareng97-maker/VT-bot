@@ -2,8 +2,8 @@ import os
 import gc
 import json
 import datetime
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from gradio_client import Client, handle_file
 from PIL import Image
 
@@ -15,11 +15,9 @@ WEBHOOK_BASE_URL = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBH
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "30"))
 COUNTER_FILE = "/tmp/vton_counter.json"
 
-# Photos larger than this (on the longest side) get resized down before processing,
-# to keep memory usage low on the free instance.
 MAX_IMAGE_DIMENSION = 768
 
-PHOTO1, PHOTO2 = range(2)
+WELCOME, PHOTO1, PHOTO2, GARMENT_TYPE = range(4)
 
 
 def _load_counter():
@@ -41,7 +39,6 @@ def _save_counter(data):
 
 
 def _resize_image_in_place(path, max_dim=MAX_IMAGE_DIMENSION):
-    """Shrink an image on disk if it's larger than max_dim on its longest side."""
     try:
         with Image.open(path) as img:
             img = img.convert("RGB")
@@ -70,7 +67,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ظرفیت امروز پر شد، فردا دوباره امتحان کنید.")
         return ConversationHandler.END
 
-    await update.message.reply_text("سلام! 👋 به اتاق پرو مجازی زاروس خوش اومدید. لطفاً اول عکس خودتون رو ارسال کنید. 📸")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 شروع پرو مجازی", callback_data="begin_tryon")]
+    ])
+    await update.message.reply_text(
+        "سلام! 👋 به اتاق پرو مجازی زاروس خوش اومدید.\nبرای شروع، دکمه‌ی زیر رو بزنید. ✨",
+        reply_markup=keyboard
+    )
+    return WELCOME
+
+
+async def begin_tryon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("لطفاً اول عکس خودتون رو ارسال کنید. 📸")
     return PHOTO1
 
 
@@ -101,7 +111,35 @@ async def get_photo2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await photo_file.download_to_drive(garment_path)
     _resize_image_in_place(garment_path)
 
-    await update.message.reply_text("عکس‌ها دریافت شدن، شما در حال پوشیدن لباس هستید... ⏳✨")
+    context.user_data["garment_path"] = garment_path
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👕 بالاتنه", callback_data="upper"),
+            InlineKeyboardButton("👖 پایین‌تنه", callback_data="lower"),
+        ]
+    ])
+    await update.message.reply_text(
+        "این لباس بالاتنه است یا پایین‌تنه؟ 🤔",
+        reply_markup=keyboard
+    )
+    return GARMENT_TYPE
+
+
+async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    garment_des = "pants" if query.data == "lower" else "clothing"
+
+    person_path = context.user_data.get("person_path")
+    garment_path = context.user_data.get("garment_path")
+
+    if not person_path or not garment_path or not os.path.exists(person_path) or not os.path.exists(garment_path):
+        await query.edit_message_text("مشکلی پیش اومد، لطفاً دوباره با /start شروع کنید.")
+        return ConversationHandler.END
+
+    await query.edit_message_text("عکس‌ها دریافت شدن، شما در حال پوشیدن لباس هستید... ⏳✨")
 
     result_img_path = None
     try:
@@ -109,7 +147,7 @@ async def get_photo2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = client.predict(
             dict={"background": handle_file(person_path), "layers": [], "composite": None},
             garm_img=handle_file(garment_path),
-            garment_des="clothing",
+            garment_des=garment_des,
             is_checked=True,
             is_checked_crop=True,
             denoise_steps=30,
@@ -120,7 +158,8 @@ async def get_photo2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result_img_path = result[0] if isinstance(result, (list, tuple)) else result
 
         with open(result_img_path, 'rb') as photo:
-            await update.message.reply_photo(
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
                 photo=photo,
                 caption="از اتاق پرو اومدید بیرون! می\u200cتونید خودتون رو توی آینه\u200cی زاروس ببینید. 🪞😍😍😍"
             )
@@ -130,16 +169,16 @@ async def get_photo2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _save_counter(counter)
 
     except Exception as e:
-        await update.message.reply_text(
-            "اتاق‌های پرو همه پر هستن، لطفا چند دقیقه صبر کنید.\nممنون از شکیبایی شما. 🙏"
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="اتاق‌های پرو همه پر هستن، لطفا چند دقیقه صبر کنید.\nممنون از شکیبایی شما. 🙏"
         )
         print(f"Error: {e}")
 
     finally:
-        # Delete this user's files right away (not on a delay) so nothing is left
-        # behind even if the process restarts a moment later.
         _cleanup_files([person_path, garment_path, result_img_path])
         context.user_data.pop("person_path", None)
+        context.user_data.pop("garment_path", None)
         gc.collect()
 
     return ConversationHandler.END
@@ -161,8 +200,10 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
+            WELCOME: [CallbackQueryHandler(begin_tryon, pattern="^begin_tryon$")],
             PHOTO1: [MessageHandler(filters.PHOTO, get_photo1)],
             PHOTO2: [MessageHandler(filters.PHOTO, get_photo2)],
+            GARMENT_TYPE: [CallbackQueryHandler(get_garment_type, pattern="^(upper|lower)$")],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
