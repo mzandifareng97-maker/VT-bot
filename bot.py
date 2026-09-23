@@ -223,6 +223,7 @@ async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    user_id = update.effective_user.id
     garment_des = "pants" if query.data == "lower" else "clothing"
     category = query.data  # "upper" or "lower"
 
