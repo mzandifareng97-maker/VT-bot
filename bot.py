@@ -2,6 +2,7 @@ import os
 import gc
 import json
 import shutil
+import time
 import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
@@ -62,42 +63,55 @@ def _cleanup_files(paths):
             print(f"Cleanup error for {p}: {e}")
 
 
-def _run_tryon(person_path, garment_path, category):
+def _run_tryon(person_path, garment_path, category, max_attempts=3):
     """
     category: "upper" or "lower".
     Returns the local file path of the generated result image.
-    """
-    if category == "lower":
-        # yisol/IDM-VTON is only trained for upper-body garments, so for
-        # pants/shorts we use franciszzj/Leffa instead, which has a
-        # dedicated DressCode-trained model for lower-body garments.
-        client = Client("franciszzj/Leffa")
-        result = client.predict(
-            handle_file(person_path),
-            handle_file(garment_path),
-            False,          # ref_acceleration
-            30,             # inference steps
-            2.5,            # guidance scale
-            42,             # seed
-            "dress_code",   # vt_model_type
-            "lower_body",   # vt_garment_type
-            False,          # vt_repaint
-            api_name="/leffa_predict_vt"
-        )
-    else:
-        client = Client("yisol/IDM-VTON")
-        result = client.predict(
-            dict={"background": handle_file(person_path), "layers": [], "composite": None},
-            garm_img=handle_file(garment_path),
-            garment_des="clothing",
-            is_checked=True,
-            is_checked_crop=True,
-            denoise_steps=30,
-            seed=42,
-            api_name="/tryon"
-        )
 
-    return result[0] if isinstance(result, (list, tuple)) else result
+    Retries a few times with a short backoff, since most failures from the
+    free Hugging Face Spaces are transient (the Space waking up from sleep,
+    or the shared queue being briefly full) rather than real errors.
+    """
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if category == "lower":
+                # yisol/IDM-VTON is only trained for upper-body garments, so for
+                # pants/shorts we use franciszzj/Leffa instead, which has a
+                # dedicated DressCode-trained model for lower-body garments.
+                client = Client("franciszzj/Leffa")
+                result = client.predict(
+                    handle_file(person_path),
+                    handle_file(garment_path),
+                    False,          # ref_acceleration
+                    30,             # inference steps
+                    2.5,            # guidance scale
+                    42,             # seed
+                    "dress_code",   # vt_model_type
+                    "lower_body",   # vt_garment_type
+                    False,          # vt_repaint
+                    api_name="/leffa_predict_vt"
+                )
+            else:
+                client = Client("yisol/IDM-VTON")
+                result = client.predict(
+                    dict={"background": handle_file(person_path), "layers": [], "composite": None},
+                    garm_img=handle_file(garment_path),
+                    garment_des="clothing",
+                    is_checked=True,
+                    is_checked_crop=True,
+                    denoise_steps=30,
+                    seed=42,
+                    api_name="/tryon"
+                )
+            return result[0] if isinstance(result, (list, tuple)) else result
+        except Exception as e:
+            last_error = e
+            print(f"_run_tryon attempt {attempt}/{max_attempts} failed: {e}")
+            if attempt < max_attempts:
+                time.sleep(attempt * 5)  # 5s, then 10s before the next try
+
+    raise last_error
 
 
 def _restart_keyboard():
@@ -260,7 +274,7 @@ async def get_garment_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="اتاق‌های پرو همه پر هستن، لطفا چند دقیقه صبر کنید.\nممنون از شکیبایی شما. 🙏",
+            text="اتاق‌های پرو تا لحظاتی دیگه خالی می‌شن، لطفاً صبر کنید و دوباره امتحان کنید.\nممنون از شکیبایی شما. 🙏",
             reply_markup=_restart_keyboard()
         )
         print(f"Error: {e}")
